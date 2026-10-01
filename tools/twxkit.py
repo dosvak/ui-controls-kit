@@ -57,7 +57,9 @@ UITK_TYPES = {'DataSeries': '12.63a604e8-e026-4605-aae1-272b67822cc7', 'DataPoin
               'StreetAddress': '12.53cf0411-8c1d-454c-ab08-74eeb9d5a060', 'LatLong': '12.5cc4a08f-5502-43a3-9259-ae44bdb8cada'}
 TEAM_ALL_USERS = '24.da7e4d23-78cb-4483-98ed-b9c238308a03'   # System Data "All Users"
 TEAM_SYSTEM = '24.6fd38d02-81cf-48ab-bd42-8ff4c0a1628b'      # System Data "System" (lane of service flows)
-THEME_CLASSIC = '72.e77f2a7e-10b4-45ee-90eb-e5b1546cc743'    # System Data theme "Classic" (also "Carbon" 72.993e03e9-2574-40fc-807c-65b06be378fd)
+THEME_CLASSIC = '72.e77f2a7e-10b4-45ee-90eb-e5b1546cc743'    # System Data theme "Classic"
+THEME_CARBON = '72.993e03e9-2574-40fc-807c-65b06be378fd'     # System Data theme "Carbon"
+THEMES = {'classic': THEME_CLASSIC, 'carbon': THEME_CARBON}
 # UI Toolkit 8.6.0.0 coach views (name -> id); the same ids on BAW 26
 VIEWS = {'Alerts': '64.e6b70dd5-4d8e-4598-a08b-dcb9a9dfaba5', 'Area Chart SDS': '64.2c8ffc35-7cea-4d7b-85d9-e3d02a901bea', 'Badge': '64.dbd042c3-8328-49af-9f0b-a92ba4ffb841',
          'Bar Chart SDS': '64.8d17dda8-175c-49ec-aaa8-cba00f7b5c24', 'Breadcrumbs': '64.281a0d61-afa8-4297-bbc8-29a2d1c1bc83', 'Button': '64.7133c7d4-1a54-45c8-89cd-a8e8fa4a8e36',
@@ -111,7 +113,7 @@ BPD_OFFICE = ('<officeIntegration><sharePointParentSiteDisabled>true</sharePoint
               '<sharePointWorkspaceSiteDescription>This site has been automatically generated for managing collaborations and documents for the process instance: &lt;#= tw.system.process.name #&gt; &lt;#= tw.system.process.instanceId #&gt;</sharePointWorkspaceSiteDescription>'
               '<sharePointWorkspaceSiteTemplate>WorkspaceSiteTemplate.stp</sharePointWorkspaceSiteTemplate><sharePointLCID>1033</sharePointLCID></officeIntegration>')
 # Diagram geometry the designer uses (pixels): node boxes, lane stacking, column spacing of the automatic layout
-BPD_SIZE = {'start': (24, 24), 'end': (24, 24), 'timer': (24, 24), 'gateway': (32, 32), 'parallel': (32, 32), 'script': (95, 70), 'service': (95, 70), 'user': (95, 70)}
+BPD_SIZE = {'start': (24, 24), 'end': (24, 24), 'timer': (24, 24), 'boundary': (24, 24), 'gateway': (32, 32), 'parallel': (32, 32), 'script': (95, 70), 'service': (95, 70), 'user': (95, 70)}
 BPD_LANE_HEIGHT = 150; BPD_COLUMN = 150; BPD_LEFT = 60
 
 def esc(s): return str(s).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('\r', '&#xD;')
@@ -248,6 +250,11 @@ class Layout:
                                                             "the coach generator answers 500 for an unknown option")
             for box_id, _ in boxes:
                 assert box_id in boxes_declared, f"{item_id}: '{view}' has no content box '{box_id}' (declared: {', '.join(boxes_declared) or 'none'})"
+        for k, v in options.items():   # event expressions run in the browser: there is no tw object (ReferenceError: tw is not defined)
+            if k.startswith('event') and isinstance(v, str) and re.search(r'\btw\.(local|env|system|object)\b', v):
+                raise AssertionError(f"{item_id}: the {k} expression uses tw.* - coach event expressions have no tw object (ReferenceError at "
+                                     "click time, on every version). Read values with control getters (${Ctrl}.getText(), getSelectedRecords()) "
+                                     "and pass a service input with ${SvcCall}.execute({field: value, ...})")
         for k, v in (options or {}).items():
             cfgs = cfgs + [self.cfg(k, v[1], True) if isinstance(v, tuple) else self.cfg(k, v if isinstance(v, str) else json.dumps(v))]
         if top: head = f'<{ns}:layoutItem xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="{ns}:ViewRef" version="8550">'; tail = f'</{ns}:layoutItem>'
@@ -635,14 +642,37 @@ class Layout:
         o.update(options)
         return self.ref(item_id, 'Service Data Table', self.std(title), binding=f'{binding}[]', boxes=[('ContentBox1', children)], options=o)
 
+# CP4BA Workflow serves the product applications under a context root: /bas on the Studio (Workflow Authoring), /baw-<instance> on a
+# Process Server (e.g. /baw-bawins1). Server-side REST calls of the kit (kitHttp) append every path (/rest/..., /bpm/..., /ops/...) to
+# serverBaseURL, so the context root belongs in serverBaseURL only: the in-pod loopback https://localhost:9443<context root>
+# (verified on CP4BA 24.0.1: Studio /bas and Process Server /baw-bawins1).
+def cp4ba_default(name, value, context_root):
+    """Environment variable default for target='cp4ba': the localhost:9443 loopback of serverBaseURL gets the context root."""
+    if name == 'serverBaseURL' and re.fullmatch(r'https://localhost:9443/?', str(value)): return 'https://localhost:9443' + context_root
+    return value
+
 # ------------------------------------------------------------------------------------------------------ the application
 class App:
-    def __init__(self, name, acronym, snapshot='1.0', description='', namespace=None, sysdata_tc=False, snapshot_description=''):
+    def __init__(self, name, acronym, snapshot='1.0', description='', namespace=None, sysdata_tc=False, snapshot_description='', target=None,
+                 context_root=None, theme=None):
+        """target = 'traditional' (default: System Data 8.6.0.0, any 8.6.2 / BAW 20-26 center) or 'cp4ba' (System Data bound to its
+        8.6.0.0_TC snapshot - required on a CP4BA Studio 24-26: the 8.6.0.0 binding imports there but assetsValidation reports ErrorType 5 and
+        the snapshot cannot be installed on a Process Server). Both write targetEnvironment BAW_tWAS: the Studio turns it into BAW_CP4A on
+        import, while a traditional Workflow Center refuses BAW_CP4A ("can't import versions of projects intended for a container only
+        environment") - so a cp4ba build also imports on BAW 20.0.0.1 and 26 (both carry 8.6.0.0_TC). Verified on 20.0.0.1, 26, CP4BA 24.0.1.
+        Default from the TWXKIT_TARGET environment variable.
+        context_root (cp4ba only) = the Workflow context root in the serverBaseURL default: '/bas' (Studio, default) or '/baw-<instance>'
+        (Process Server); default from TWXKIT_CONTEXT_ROOT. On a Process Server the value can also be changed after the install
+        (POST /ops/std/bpm/containers/<acr>/versions/<v>/env_vars {"pairs": [{"name": "serverBaseURL", "value": ...}]} - live)."""
         assert re.fullmatch(r'[A-Z0-9_]{1,7}', acronym), 'acronym: 1-7 upper-case letters / digits'
+        self.target = (target or os.environ.get('TWXKIT_TARGET') or 'traditional').lower()
+        assert self.target in ('traditional', 'cp4ba'), "target: 'traditional' or 'cp4ba'"
+        self.context_root = '/' + (context_root or os.environ.get('TWXKIT_CONTEXT_ROOT') or '/bas').strip('/')
+        self.theme = (theme or os.environ.get('TWXKIT_THEME') or 'classic').lower(); assert self.theme in THEMES, f'theme: {sorted(THEMES)}'
         self.name, self.acronym, self.snapshot, self.description = name, acronym, snapshot, description
         self.snapshot_description = snapshot_description
         self.ns = namespace or uuid.uuid5(uuid.NAMESPACE_URL, 'twxkit:' + acronym)
-        self.sys_snapshot = SYSDATA_TC_SNAPSHOT if sysdata_tc else SYSDATA['snapshot']
+        self.sys_snapshot = SYSDATA_TC_SNAPSHOT if (sysdata_tc or self.target == 'cp4ba') else SYSDATA['snapshot']
         self.dep_sys = self.did('dependency', 'TWSYS'); self.dep_ui = self.did('dependency', 'SYSBPMUI')
         self.project_id = '2066.' + self.did('project'); self.branch_id = '2063.' + self.did('branch'); self.snapshot_id = '2064.' + self.did('snapshot', snapshot)
         self.objects = {}      # id -> (name, type, xml)
@@ -693,6 +723,7 @@ class App:
     def env(self, name, default, description=''):
         """Environment variable with its default. KITENV_<name> in the build environment overrides the default (lab builds with real
         hosts and users - give such a build its own snapshot name, the server caches tw.env per snapshot)."""
+        if self.target == 'cp4ba': default = cp4ba_default(name, default, self.context_root)
         default = os.environ.get('KITENV_' + name, default)
         assert default != '', f"environment variable {name}: the default must not be empty (the import fails on an empty value); use a placeholder such as '-' and treat it as empty in the scripts (kitEnv(name, '') does not, so compare explicitly)"
         self.envs.append((name, default, description))
@@ -755,7 +786,7 @@ class App:
         <participantRef>{team}</participantRef>
         <defaultXslRef isNull="true" />
         <defaultCssRef isNull="true" />
-        <defaultTheme>{self.dep_sys}/{THEME_CLASSIC}</defaultTheme>
+        <defaultTheme>{self.dep_sys}/{THEMES[self.theme]}</defaultTheme>
         <themeVersion isNull="true" />
         <defaultJsRefs isNull="true" />
         <isWbmEnabled>false</isWbmEnabled>
@@ -881,7 +912,9 @@ class App:
     # ---- teams (24.)
     def team(self, name, users=(), groups=(), default=False):
         """Team with standard members (user logins and/or group names of the server's registry). default=True makes it the
-        process app's default team (Process App Settings)."""
+        process app's default team (Process App Settings). TWXKIT_MEMBERS=u1,u2 in the build environment replaces the users of every
+        team that lists users (the registry of the target differs: celladmin on a lab, LDAP users on CP4BA)."""
+        if users and os.environ.get('TWXKIT_MEMBERS'): users = [u.strip() for u in os.environ['TWXKIT_MEMBERS'].split(',') if u.strip()]
         oid = '24.' + self.did('team', name); self.teams[name] = oid
         if default: self.default_team = name
         members = [{"name": u, "declaredType": "com.ibm.bpmsdk.model.bpmn20.ibmteamext.Member"} for u in users]
@@ -1399,6 +1432,9 @@ class App:
     def bpd(self, name, lanes, nodes, flows, inputs=(), variables=(), searchable=(), exposed_team='All Users', instance_name=None, description=''):
         """Business process (BPD). lanes = [(name, team[, height])] top to bottom (team 'System' = system lane; other teams: 'All Users' or a
         team of this app); nodes = [dict(key, kind, name, lane, ...)] with kind start | end | timer (hours= / minutes= / custom='tw.local.date')
+        | boundary (timer attached to an activity: attach=<user / service / script node key>, hours= / minutes= / custom= like timer,
+        interrupting=False (default: the activity keeps running, the timer adds a token; True = the timer cancels the activity); x / y
+        default to the bottom edge of the activity; flows leave it like any node, nothing flows into it)
         | script (script=) | service (callee=<flow name>, inputs={param: expression}, outputs={param: variable}) | user (callee=<human service
         name built with cshs(inputs=, outputs=, exits=)>, inputs= / outputs= like service, priority=, due_hours=, subject=, narrative=) |
         gateway (exclusive; the flow without a condition is the default) | parallel; flows = [(src, dst[, name[, condition]])].
@@ -1417,9 +1453,19 @@ class App:
         N = []
         for i, n in enumerate(nodes):
             n = dict(n); k = n['kind']
-            if k not in BPD_SIZE: raise ValueError(f"node {n['key']}: unknown kind {k} (start, end, timer, script, service, user, gateway, parallel)")
+            if k not in BPD_SIZE: raise ValueError(f"node {n['key']}: unknown kind {k} (start, end, timer, boundary, script, service, user, gateway, parallel)")
+            if k == 'boundary':
+                host = [m for m in nodes if m['key'] == n.get('attach')]
+                if not host or host[0]['kind'] not in ('user', 'service', 'script'): raise KeyError(f"node {n['key']}: attach= must name a user / service / script node")
+                if host[0]['lane'] != n['lane']: raise ValueError(f"node {n['key']}: a boundary event lives in the lane of its activity ({host[0]['lane']})")
+                if any(f[1] == n['key'] for f in flows): raise ValueError(f"node {n['key']}: nothing flows into a boundary event")
             if n['lane'] not in lane_of: raise KeyError(f"node {n['key']}: unknown lane {n['lane']}")
             lane = lane_of[n['lane']]; w, h = BPD_SIZE[k]
+            if k == 'boundary':   # default position: on the bottom edge of the activity (list the activity first), a little apart per attached event
+                act = [m for m in N if m['key'] == n['attach']]
+                if not act: raise ValueError(f"node {n['key']}: list the boundary event after its activity {n['attach']}")
+                nth = sum(1 for m in N if m.get('attach') == n['attach'])
+                n.setdefault('x', act[0]['x'] + 20 + 28 * nth); n.setdefault('y', min(lane['height'] - h, act[0]['y'] + 58))
             n.setdefault('x', BPD_LEFT + BPD_COLUMN * i); n.setdefault('y', max(0, (lane['height'] - h) // 2))
             if n['y'] < 0 or n['y'] + h > lane['height']:
                 raise ValueError(f"node {n['key']}: y={n['y']} (+{h}) is outside lane {n['lane']} (height {lane['height']}); y is relative to the lane top")
@@ -1690,7 +1736,7 @@ def render_bpd(app, name, bid, nodes, flows, lanes, inputs, variables, searchabl
     # a decision gateway evaluates its outgoing flows in order and the default matches always: conditional flows first, the default last
     for n in nodes:
         if n['kind'] == 'gateway': out_flows[n['key']] = [f for f in out_flows[n['key']] if len(f) > 4 and f[4]] + [f for f in out_flows[n['key']] if not (len(f) > 4 and f[4])]
-    size = lambda n: (24, 24) if n['kind'] in ('start', 'end', 'timer', 'messageStart') else (32, 32) if n['kind'] in ('gateway', 'parallel') else (95, 70)
+    size = lambda n: (24, 24) if n['kind'] in ('start', 'end', 'timer', 'boundary', 'messageStart') else (32, 32) if n['kind'] in ('gateway', 'parallel') else (95, 70)
     ref = lambda ty: ty if str(ty).startswith('/') else dep(ty)          # class / team reference with the dependency prefix (System Data) or app-local
     bare = lambda ty: str(ty).lstrip('/')                                # bare id for itm. references and BPMN partitionElementRef
     cond = lambda f: f[4] if len(f) > 4 and f[4] else None
@@ -1737,6 +1783,9 @@ def render_bpd(app, name, bid, nodes, flows, lanes, inputs, variables, searchabl
         if k == 'timer':
             return (f'<ns16:intermediateCatchEvent name="{nm}" id="{i}"><ns16:extensionElements>{vis(n)}{defext(n)}</ns16:extensionElements>{inout(n)}'
                     f'<ns16:timerEventDefinition id="{did("bpd", name, "timerDef", n["key"])}" eventImplId="{did("bpd", name, "timerImpl", n["key"])}"><ns16:extensionElements><ns4:timerEventSettings>{timer_bpmn(n)}<ns4:toleranceInterval>0</ns4:toleranceInterval><ns4:toleranceIntervalResolution>Hours</ns4:toleranceIntervalResolution><ns4:useCalendar>false</ns4:useCalendar></ns4:timerEventSettings></ns16:extensionElements></ns16:timerEventDefinition></ns16:intermediateCatchEvent>')
+        if k == 'boundary':
+            return (f'<ns16:boundaryEvent cancelActivity="{"true" if n.get("interrupting") else "false"}" attachedToRef="{ids[n["attach"]]}" parallelMultiple="false" name="{nm}" id="{i}"><ns16:extensionElements>{vis(n)}{defext(n)}</ns16:extensionElements>{inout(n)}'
+                    f'<ns16:timerEventDefinition id="{did("bpd", name, "timerDef", n["key"])}" eventImplId="{did("bpd", name, "timerImpl", n["key"])}"><ns16:extensionElements><ns4:timerEventSettings>{timer_bpmn(n)}<ns4:toleranceInterval>0</ns4:toleranceInterval><ns4:toleranceIntervalResolution>Hours</ns4:toleranceIntervalResolution><ns4:useCalendar>false</ns4:useCalendar></ns4:timerEventSettings></ns16:extensionElements></ns16:timerEventDefinition></ns16:boundaryEvent>')
         if k == 'script': return f'<ns16:scriptTask scriptFormat="text/x-javascript"{default(n)} name="{nm}" id="{i}"><ns16:extensionElements>{vis(n)}</ns16:extensionElements>{inout(n)}<ns16:script>{esc(n["script"])}</ns16:script></ns16:scriptTask>'
         if k == 'service':
             return (f'<ns16:callActivity calledElement="{n["callee"]}"{default(n)} name="{nm}" id="{i}"><ns16:extensionElements><ns4:deleteTaskOnCompletion>true</ns4:deleteTaskOnCompletion>{vis(n)}{uts}<ns4:activityType>ServiceTask</ns4:activityType><ns4:activityExtension conditional="false"><ns4:conditionScript /></ns4:activityExtension></ns16:extensionElements>{inout(n)}{assoc(n)}{performers}</ns16:callActivity>')
@@ -1782,6 +1831,8 @@ def render_bpd(app, name, bid, nodes, flows, lanes, inputs, variables, searchabl
         if k == 'parallel': return {**base, "gatewayDirection": "Unspecified", "extensionElements": {"nodeVisualInfo": [nvi(n)]}, "declaredType": "parallelGateway"}
         if k == 'end': return {**base, "extensionElements": {"nodeVisualInfo": [nvi(n)]}, "declaredType": "endEvent"}
         if k == 'timer': return {**base, "parallelMultiple": False, "eventDefinition": [{"extensionElements": {"timerEventSettings": [{**({"customDate": timer_parts(n)['custom']} if timer_parts(n)['custom'] else {}), "relativeTime": timer_parts(n)['time'], "relativeTimeResolution": timer_parts(n)['unit'], "dateType": timer_parts(n)['dateType'], "toleranceInterval": "0", "useCalendar": False, "declaredType": "com.ibm.bpmsdk.model.bpmn20.ibmwleext.TTimerEventSettings", "toleranceIntervalResolution": "Hours", "relativeDirection": timer_parts(n)['direction']}]}, "declaredType": "timerEventDefinition", "id": did("bpd", name, "timerDef", n["key"]), "otherAttributes": {"eventImplId": did("bpd", name, "timerImpl", n["key"])}}], "extensionElements": {**({"default": [ids[out_flows[n['key']][0][0]]]} if out_flows[n['key']] else {}), "nodeVisualInfo": [nvi(n)]}, "declaredType": "intermediateCatchEvent"}
+        if k == 'boundary':
+            return {**base, "cancelActivity": bool(n.get('interrupting')), "attachedToRef": ids[n['attach']], "parallelMultiple": False, "eventDefinition": [{"extensionElements": {"timerEventSettings": [{**({"customDate": timer_parts(n)['custom']} if timer_parts(n)['custom'] else {}), "relativeTime": timer_parts(n)['time'], "relativeTimeResolution": timer_parts(n)['unit'], "dateType": timer_parts(n)['dateType'], "toleranceInterval": "0", "useCalendar": False, "declaredType": "com.ibm.bpmsdk.model.bpmn20.ibmwleext.TTimerEventSettings", "toleranceIntervalResolution": "Hours", "relativeDirection": timer_parts(n)['direction']}]}, "declaredType": "timerEventDefinition", "id": did("bpd", name, "timerDef", n["key"]), "otherAttributes": {"eventImplId": did("bpd", name, "timerImpl", n["key"])}}], "extensionElements": {**({"default": [ids[out_flows[n['key']][0][0]]]} if out_flows[n['key']] else {}), "nodeVisualInfo": [nvi(n)]}, "declaredType": "boundaryEvent"}
         if k == 'script': return {**base, "startQuantity": 1, **jdefault(n), "extensionElements": {"nodeVisualInfo": [nvi(n)]}, "isForCompensation": False, "completionQuantity": 1, "declaredType": "scriptTask", "scriptFormat": "text/x-javascript", "script": {"content": [n['script']]}}
         if k == 'service':
             return {**base, "extensionElements": {"activityExtension": [{"conditionScript": "", "conditional": False, "declaredType": "com.ibm.bpmsdk.model.bpmn20.ibmwleext.TActivityExtension"}], "deleteTaskOnCompletion": [True], "nodeVisualInfo": [nvi(n)], "userTaskSettings": [juts], "activityType": ["ServiceTask"]}, "declaredType": "callActivity", "startQuantity": 1, "resourceRole": [{**p, **({} if 'teamAssignmentType' not in p else {})} for p in jperf], **jdefault(n),
@@ -1814,7 +1865,18 @@ def render_bpd(app, name, bid, nodes, flows, lanes, inputs, variables, searchabl
     PRIORITY_CODE = {'Normal': '30.30'}   # only the default is known to import ('20.20' fails with "Invalid UUID string '20'" in BPDTaskActivityImplAG.priorityFromXML); other values pending the Hiring Sample export
     sched_of = lambda n: f'<dueDateType>1</dueDateType><dueDateTime>{n.get("due_hours", 1)}</dueDateTime><dueDateTimeResolution>1</dueDateTimeResolution><dueDateTimeTOD>00:00</dueDateTimeTOD><priorityType>0</priorityType><priority>{PRIORITY_CODE.get(n.get("priority", "Normal"), "30.30")}</priority>' + (f'<subject>{esc(n["subject"])}</subject>' if n.get('subject') else '') + (f'<narrative>{esc(n["narrative"])}</narrative>' if n.get('narrative') else '') + '<forceSend>true</forceSend>'
     sched2 = '<timeSchedule>(use default)</timeSchedule><timeScheduleType>0</timeScheduleType><timeZone>(use default)</timeZone><timeZoneType>0</timeZoneType><holidaySchedule>(use default)</holidaySchedule><holidayScheduleType>0</holidayScheduleType>'
-    def activity(n, body): return f'<flowObject id="{ids[n["key"]]}" componentType="Activity"><name>{esc(n["name"])}</name><documentation></documentation><position><location x="{n["x"]}" y="{n["y"]}" /></position><dropIconUrl>0</dropIconUrl><colorInput>#A5B7CD</colorInput><component>{body}</component>{ports(n)}</flowObject>'
+    def activity(n, body): return f'<flowObject id="{ids[n["key"]]}" componentType="Activity"><name>{esc(n["name"])}</name><documentation></documentation><position><location x="{n["x"]}" y="{n["y"]}" /></position><dropIconUrl>0</dropIconUrl><colorInput>#A5B7CD</colorInput><component>{body}</component>{ports(n)}{attached(n)}</flowObject>'
+    def timer_action(n):
+        tp = timer_parts(n)   # legacy codes: dateType 0 = now, 2 = custom date; resolution 0 = minutes, 1 = hours
+        return f'<EventAction id="{did("bpd", name, "timerDef", n["key"])}"><actionType>2</actionType><actionSubType>0</actionSubType><EventActionImplementation id="{did("bpd", name, "timerImpl", n["key"])}"><dateType>{2 if tp["custom"] else 0}</dateType>' + (f'<customDate>{esc(tp["custom"])}</customDate>' if tp['custom'] else '') + f'<relativeDirection>1</relativeDirection><relativeTime>{tp["time"]}</relativeTime><relativeTimeResolution>{0 if tp["unit"] == "Minutes" else 1}</relativeTimeResolution><toleranceInterval>0</toleranceInterval><toleranceIntervalResolution>1</toleranceIntervalResolution><UseCalendar>false</UseCalendar></EventActionImplementation></EventAction>'
+    def attached(n):   # boundary timers of an activity: <attachedEvent> children of its flowObject (legacy format of the Process Designer)
+        out = ''
+        for b in [m for m in nodes if m['kind'] == 'boundary' and m['attach'] == n['key']]:
+            flag = 'true' if b.get('interrupting') else 'false'
+            out += (f'<attachedEvent id="{ids[b["key"]]}" componentType="Event"><name>{esc(b["name"])}</name><documentation></documentation><position><location x="0" y="0" /></position><positionId>bottomCenter</positionId><dropIconUrl>0</dropIconUrl><colorInput>Color</colorInput>'
+                    f'<component><nameVisible>true</nameVisible><eventType>3</eventType><cancelActivity>{flag}</cancelActivity><repeatable>false</repeatable><doCloseTask>{flag}</doCloseTask>{timer_action(b)}</component>'
+                    + ''.join(f'<outputPort id="{bpdid("p." + b["key"] + ".out." + f[0])}"><positionId>bottomCenter</positionId><flow ref="{ids[f[0]]}" /></outputPort>' for f in out_flows[b['key']]) + '</attachedEvent>')
+        return out
     def lane_team(n): return [l for l in lanes if l['key'] == n['lane']][0]['team']
     def gateway(n, gateway_type=1): return f'<flowObject id="{ids[n["key"]]}" componentType="Gateway"><name>{esc(n["name"])}</name><documentation></documentation><position><location x="{n["x"]}" y="{n["y"]}" /></position><dropIconUrl>0</dropIconUrl><colorInput>#A5B7CD</colorInput><component><nameVisible>true</nameVisible><gatewayType>{gateway_type}</gatewayType><splitJoinType>0</splitJoinType></component>{ports(n)}</flowObject>'   # 1 = exclusive (decision), 5 = parallel (split)
     def message_action(n):
@@ -1833,6 +1895,7 @@ def render_bpd(app, name, bid, nodes, flows, lanes, inputs, variables, searchabl
         if k == 'gateway': return gateway(n)
         if k == 'parallel': return gateway(n, 5)
         if k == 'end': return event(n, 2)
+        if k == 'boundary': return ''   # rendered inside its activity (attached())
         if k == 'timer':
             tp = timer_parts(n)   # legacy codes: dateType 0 = now, 2 = custom date; resolution 0 = minutes, 1 = hours
             return event(n, 3, f'<EventAction id="{did("bpd", name, "timerDef", n["key"])}"><actionType>2</actionType><actionSubType>0</actionSubType><EventActionImplementation id="{did("bpd", name, "timerImpl", n["key"])}"><dateType>{2 if tp["custom"] else 0}</dateType>' + (f'<customDate>{esc(tp["custom"])}</customDate>' if tp['custom'] else '') + f'<relativeDirection>1</relativeDirection><relativeTime>{tp["time"]}</relativeTime><relativeTimeResolution>{0 if tp["unit"] == "Minutes" else 1}</relativeTimeResolution><toleranceInterval>0</toleranceInterval><toleranceIntervalResolution>1</toleranceIntervalResolution><UseCalendar>false</UseCalendar></EventActionImplementation></EventAction>')

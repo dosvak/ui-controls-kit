@@ -14,8 +14,18 @@ blocks only (System Data, UI Toolkit, one client-side human service, six small s
 
 ## Install
 
-1. Import `packages/UI-Controls-Kit-1.2.twx` (Process Center / Workflow Center console: *Import Process App*; CP4BA: Business Automation Studio > *Import*).
+1. Import the package of your platform:
+   * IBM BPM 8.6.2 / IBM BAW 20-26 traditional: `packages/UI-Controls-Kit-1.2.twx` (Process Center / Workflow Center console: *Import Process App*);
+   * CP4BA (Business Automation Studio > *Import*): `packages/UI-Controls-Kit-1.2-CP4BA.twx` - the same app bound to the Cloud Pak System Data
+     (`8.6.0.0_TC`) with `serverBaseURL` defaulting to the Studio loopback `https://localhost:9443/bas` (on a Process Server set it to
+     `https://localhost:9443/baw-<instance>`). After the import create one snapshot in the Studio and install / play back that one: an
+     imported generated snapshot carries no compiled theme and renders unstyled outside the branch tip. This build also imports on
+     traditional BAW 20.0.0.1 and later.
 2. Open the dashboard *UI Controls Kit* from Process Portal (exposed to All Users) or through the playback URL of the human service.
+
+## Versions
+
+* **1.2-CP4BA** - new: the same version built for CP4BA (see Install); the traditional `UI-Controls-Kit-1.2.twx` is unchanged.
 
 ## Documents
 

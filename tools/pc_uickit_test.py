@@ -31,7 +31,7 @@ async def main():
         async def shot(name): await pg.screenshot(path=f'{SHOTS}/{name}.png', full_page=True)
         rep.rec('open', 'coach frame found', coach is not None)
         header = await js("document.body.innerText.slice(0, 300)")
-        rep.rec('open', 'header from UK Init (env var appTitle, user name)', 'UI Controls Kit' in header and 'celladmin' in header, header[:100])
+        rep.rec('open', 'header from UK Init (env var appTitle, user name)', 'UI Controls Kit' in header and u.bawenv.USER in header, header[:100])
         tabs = await js("Array.from(document.querySelectorAll('a[id^=\"tabs-MainTabs-tab-text\"]')).map(e=>e.innerText.trim())")
         rep.rec('open', 'six family tabs', tabs == ['Inputs', 'Display', 'Structure', 'Events', 'Charts', 'Data'], str(tabs))
 
